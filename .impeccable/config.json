@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "pulsing-dot",
+        "value": "*",
+        "files": [
+          "index.html"
+        ],
+        "createdAt": "2026-11-02T05:57:43.256Z",
+        "reason": "Claude triage: .dry-pulse and .badge.checking .dot render only while a dry run is actively playing videos, beside a live elapsed timer and progress track, so the pulse marks genuinely live state; reduced-motion handled; predates this session"
+      }
+    ]
+  }
+}
