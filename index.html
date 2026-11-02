@@ -1067,6 +1067,7 @@ const cueCurrent = () => loadItem(false);
 function playCurrent() {
   const it = cur();
   if (!it) return;
+  if (RT.ready && RT.loadedUid === it.uid && !RT.error && isPlaying()) { ytCall('seekTo', 0, true); return; }  // restart in place: loading it again lets YouTube play another ad
   if (RT.ready && RT.loadedUid === it.uid && !RT.error && [YTS.CUED, YTS.PAUSED, YTS.ENDED].includes(RT.ytState)) {
     RT.autoplayAt = performance.now();
     player.playVideo();
