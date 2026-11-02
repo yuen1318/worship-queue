@@ -940,7 +940,8 @@ const findIdx = (q, uid) => q.items.findIndex(i => i.uid === uid);
 const itemByUid = (uid, q = S.queues.worship) => q.items.find(i => i.uid === uid) || null;
 function freshCheck(song) {
   const c = song && S.checks[song.youtubeId];
-  return c && Date.now() - c.at <= CHECK_TTL_MS ? c : null;
+  // A pass only counts while this page still holds the song's paused player: after a reload its ad can play again.
+  return c && Date.now() - c.at <= CHECK_TTL_MS && (c.status === 'error' || warm.has(song.youtubeId)) ? c : null;
 }
 function uniqueSongs(q) {
   const seen = new Set();
@@ -1029,6 +1030,7 @@ function showPlayer(p) {
 }
 function onPlayerState(e) {
   RT.ytState = e.data;
+  if (RT.dry && RT.dry.step && e.data === YTS.BUFFERING) RT.dry.step.buffered = true;
   if (e.data === YTS.PLAYING) {
     RT.autoplayAt = 0; RT.tapHint = false;
     if (RT.blocked) { RT.blocked = false; renderBanner(); }
@@ -1423,8 +1425,9 @@ function dryTick(t, dur) {
       if (st.played >= PREVIEW_S) { dryFinishStep('ok'); return; }
     }
   }
+  if (!st.contentAt && st.buffered && RT.ytState === YTS.UNSTARTED) st.sawClip = true;  // YouTube reports "unstarted" while an ad plays
   st.phase = st.contentAt ? 'playing' : (now - st.t0 > 4000 ? 'waiting' : 'loading');
-  if (now - st.t0 > 90000) dryFinishStep('timeout');
+  if (now - st.t0 > (st.sawClip ? 600000 : 90000)) dryFinishStep('timeout');  // a skippable ad can run for minutes
 }
 function dryOnEnded() { if (RT.dry && RT.dry.step) dryFinishStep('ok'); }
 function dryFinishStep(kind, code) {
@@ -1710,7 +1713,7 @@ function renderResults() {
 function renderQueues() { renderSet(); renderListen(); }
 function badgeFor(s, uid) {
   const c = freshCheck(s);
-  if (!c) return `<span class="badge unchecked" title="No dry run in the last 12 hours">${DOT}Not checked</span>`;
+  if (!c) return `<span class="badge unchecked" title="No dry run since this page was opened">${DOT}Not checked</span>`;
   if (c.status === 'error') return `<span class="badge error" title="${esc(errorText(c.code))}">${DOT}Won’t play</span>`;
   const isAd = c.status === 'ad';
   const tip = isAd ? 'An ad played before this song in the dry run. Tap if it didn’t.' : `${c.delay != null ? 'Started in ' + Number(c.delay).toFixed(1) + ' s. ' : ''}Tap if an ad played.`;
@@ -1954,7 +1957,7 @@ function renderSummary() {
   if (err) parts.push(`${err} won’t play`);
   if (unchecked) parts.push(`${unchecked} not checked`);
   const tips = [];
-  if (ad) tips.push('Ads change each play. Try YouTube Premium or another upload to avoid them.');
+  if (ad) tips.push('Those ads won’t play again during the set, as long as this page stays open.');
   if (long) tips.push('Songs over 8 minutes can also show ads mid-song.');
   if (err) tips.push('Replace or remove videos that won’t play.');
   if (ready || ad) tips.push('Tap a status to correct it.');
