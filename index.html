@@ -879,7 +879,10 @@ const RT = {
   sample: false, lastClock: '', blocked: false, bannerHidden: false,
   active: 0, resultIds: [], tapHint: false, clearArmed: false, clearTimer: 0, shareTimer: 0,
 };
-let player = null;
+let player = null;      // the YouTube player on screen; every control talks to it
+let mainPlayer = null;  // plays any song that has no player of its own
+const warm = new Map(); // youtubeId -> its own player, paused at 0:00 after its dry run so its ad doesn't play again
+// shortcut: warm players live until the page reloads, even for songs taken out of the set; prune them if memory gets tight.
 const els = {};
 
 /* ---------- saving (this browser only) ---------- */
@@ -955,14 +958,21 @@ const ytCall = (fn, ...args) => {
 };
 const isPlaying = () => RT.ytState === YTS.PLAYING || RT.ytState === YTS.BUFFERING;
 
+function playerVars() {
+  const vars = { rel: 0, playsinline: 1, iv_load_policy: 3, modestbranding: 1, enablejsapi: 1 };
+  if (HAS_WEB_ADDRESS) vars.origin = location.origin;
+  return vars;
+}
 function initPlayer() {
   window.onYouTubeIframeAPIReady = () => {
-    const vars = { rel: 0, playsinline: 1, iv_load_policy: 3, modestbranding: 1, enablejsapi: 1 };
-    if (HAS_WEB_ADDRESS) vars.origin = location.origin;
     try {
-      player = new YT.Player('ytPlayer', {
-        width: '100%', height: '100%', playerVars: vars,
-        events: { onReady: onPlayerReady, onStateChange: onPlayerState, onError: onPlayerError },
+      player = mainPlayer = new YT.Player('ytPlayer', {
+        width: '100%', height: '100%', playerVars: playerVars(),
+        events: {
+          onReady: onPlayerReady,
+          onStateChange: e => { if (player === mainPlayer) onPlayerState(e); },
+          onError: e => { if (player === mainPlayer) onPlayerError(e); },
+        },
       });
     } catch (e) { RT.api = 'failed'; renderPlayerShell(); }
   };
@@ -981,6 +991,41 @@ function onPlayerReady() {
     if (p.autoplay) player.loadVideoById(p.vid); else player.cueVideoById(p.vid);
   } else if (cur()) cueCurrent();
   renderAll();
+}
+// A dry-run song gets its own player, so after its ad it can wait paused instead of being loaded (and advertised) again.
+function newPlayer(vid) {
+  const el = document.createElement('div');
+  els.playerEmpty.before(el);
+  const p = new YT.Player(el, {
+    width: '100%', height: '100%', videoId: vid, playerVars: playerVars(),
+    events: {
+      onReady: () => {
+        try { p.getIframe().setAttribute('title', 'YouTube video player'); } catch (e) { /* ignore */ }
+        if (p !== player) return;
+        if (RT.dry && RT.dry.step) RT.dry.step.t0 = performance.now();  // time the video, not the new frame loading
+        p.playVideo();
+      },
+      onStateChange: e => { if (p === player) onPlayerState(e); },
+      onError: e => { if (p === player) onPlayerError(e); },
+    },
+  });
+  return p;
+}
+// Holds the shown video at its start. Its session stays open, so it plays again without a new ad.
+function park() {
+  if (isPlaying()) ytCall('pauseVideo');
+  if (isPlaying() || RT.ytState === YTS.PAUSED) ytCall('seekTo', 0, true);  // seeking from any other state would start it
+}
+function showPlayer(p) {
+  park();
+  if (!p || p === player) return;
+  const old = player;
+  try { old.getIframe().style.display = 'none'; } catch (e) { /* ignore */ }
+  try { p.getIframe().style.display = ''; } catch (e) { /* ignore */ }
+  player = p;
+  const st = ytCall('getPlayerState');
+  RT.ytState = typeof st === 'number' ? st : YTS.UNSTARTED;
+  if (old && old !== mainPlayer && ![...warm.values()].includes(old)) { try { old.destroy(); } catch (e) { /* ignore */ } }
 }
 function onPlayerState(e) {
   RT.ytState = e.data;
@@ -1049,6 +1094,7 @@ function loadItem(autoplay) {
   RT.error = null;
   if (!it) {
     RT.loadedUid = null; RT.loadedVid = null; RT.pending = null;
+    showPlayer(mainPlayer);
     ytCall('stopVideo');
     renderNow(); renderTransport(); renderPlayerState();
     return;
@@ -1056,7 +1102,12 @@ function loadItem(autoplay) {
   const s = songOf(it);
   RT.loadedUid = it.uid; RT.loadedVid = s.youtubeId;
   RT.autoplayAt = autoplay ? performance.now() : 0;
-  if (!RT.ready) {
+  const w = warm.get(s.youtubeId);
+  showPlayer(w || mainPlayer);
+  if (w) {  // its ad already played in the dry run: start the paused video instead of loading it again
+    RT.ytState = YTS.CUED;
+    if (autoplay) ytCall('playVideo');
+  } else if (!RT.ready) {
     RT.pending = { vid: s.youtubeId, autoplay };
     if (autoplay && RT.api !== 'loading') toast(playerProblemText(), { tone: 'error' });
   } else if (autoplay) player.loadVideoById(s.youtubeId);
@@ -1351,7 +1402,9 @@ function dryNext() {
   q.index = idx;
   d.step = { uid: it.uid, vid: s.youtubeId, t0: performance.now(), contentAt: 0, contentT0: 0, lastT: 0, sawClip: false, jumpedBack: false, phase: 'loading', played: 0, dur: 0 };
   RT.loadedUid = it.uid; RT.loadedVid = s.youtubeId; RT.error = null;
-  player.loadVideoById(s.youtubeId);
+  const w = warm.get(s.youtubeId);
+  showPlayer(w || newPlayer(s.youtubeId));
+  if (w) ytCall('playVideo');
   renderAll();
 }
 function dryTick(t, dur) {
@@ -1385,7 +1438,8 @@ function dryFinishStep(kind, code) {
   else if (st.sawClip || st.jumpedBack || (delay !== null && delay > AD_DELAY_S)) status = 'ad';
   const res = { vid: st.vid, status, delay, code: kind === 'timeout' ? 'timeout' : (code == null ? null : code), long: status !== 'error' && dur >= MIDROLL_S };
   d.results[st.uid] = res;
-  S.checks[st.vid] = { status, delay, code: res.code, long: res.long, at: Date.now() };
+  if (status === 'error') warm.delete(st.vid); else warm.set(st.vid, player);
+  S.checks[st.vid] ={ status, delay, code: res.code, long: res.long, at: Date.now() };
   if (status !== 'error' && dur >= SONG_MIN_S) S.durations[st.vid] = Math.round(dur);
   save();
   if (status === 'error') { renderAll(); setTimeout(() => { if (RT.dry === d) dryNext(); }, 900); }
@@ -1400,7 +1454,6 @@ function skipDrySong() {
 }
 function finishDry(d, partial) {
   const q = S.queues.worship;
-  ytCall('stopVideo');
   q.index = q.items.length ? 0 : -1;
   q.started = false;
   RT.report = Object.keys(d.results).length ? { partial } : null;
